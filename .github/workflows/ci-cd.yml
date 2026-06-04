@@ -65,6 +65,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            type=raw,value=${{ github.sha }}
             type=sha,prefix=
             type=ref,event=branch
             type=ref,event=pr
@@ -94,7 +95,7 @@ jobs:
           sarif_file: trivy-results.sarif
 
       - name: Login to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -102,7 +103,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -111,3 +112,69 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_SSH_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Copy compose file
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR || '/opt/devops-lecture' }}
+        run: |
+          test -n "$DEPLOY_USER"
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_DIR'"
+          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" docker-compose.prod.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/docker-compose.prod.yml"
+
+      - name: Pull and restart on server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR || '/opt/devops-lecture' }}
+          APP_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          APP_TAG: ${{ github.sha }}
+          DOMAINS: ${{ secrets.DEPLOY_DOMAINS }}
+          HTTPS_PORTAL_STAGE: ${{ secrets.HTTPS_PORTAL_STAGE || 'production' }}
+          CLIENT_MAX_BODY_SIZE: ${{ secrets.CLIENT_MAX_BODY_SIZE || '10M' }}
+          DEPLOY_GHCR_USER: ${{ secrets.DEPLOY_GHCR_USER || github.actor }}
+          DEPLOY_GHCR_TOKEN: ${{ secrets.DEPLOY_GHCR_TOKEN }}
+        run: |
+          test -n "$DOMAINS"
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_DIR' && \
+             if [ -n '$DEPLOY_GHCR_TOKEN' ]; then printf '%s' '$DEPLOY_GHCR_TOKEN' | docker login ghcr.io -u '$DEPLOY_GHCR_USER' --password-stdin; fi && \
+             APP_IMAGE='$APP_IMAGE' \
+             APP_TAG='$APP_TAG' \
+             DOMAINS='$DOMAINS' \
+             HTTPS_PORTAL_STAGE='$HTTPS_PORTAL_STAGE' \
+             CLIENT_MAX_BODY_SIZE='$CLIENT_MAX_BODY_SIZE' \
+             docker compose -f docker-compose.prod.yml pull nginx && \
+             APP_IMAGE='$APP_IMAGE' \
+             APP_TAG='$APP_TAG' \
+             DOMAINS='$DOMAINS' \
+             HTTPS_PORTAL_STAGE='$HTTPS_PORTAL_STAGE' \
+             CLIENT_MAX_BODY_SIZE='$CLIENT_MAX_BODY_SIZE' \
+             docker compose -f docker-compose.prod.yml up -d && \
+             docker compose -f docker-compose.prod.yml ps"

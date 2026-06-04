@@ -41,3 +41,29 @@ curl -fsS https://example.com/healthz
 ```
 
 `https-portal` terminates TLS and proxies to the internal `nginx` app service on port `8080`.
+
+## GitHub Actions Server Deploy
+
+Pushes to `main` or `master` publish the image to GHCR, then deploy the same immutable commit SHA tag on the server with Docker Compose.
+
+Configure these repository secrets:
+
+```text
+DEPLOY_HOST=your.server.example.com
+DEPLOY_USER=deploy
+DEPLOY_SSH_KEY=<private ssh key for DEPLOY_USER>
+DEPLOY_DOMAINS=example.com -> http://nginx:8080
+```
+
+Optional secrets:
+
+```text
+DEPLOY_PORT=22
+DEPLOY_DIR=/opt/devops-lecture
+HTTPS_PORTAL_STAGE=production
+CLIENT_MAX_BODY_SIZE=10M
+DEPLOY_GHCR_USER=<github username or bot>
+DEPLOY_GHCR_TOKEN=<classic PAT or fine-grained token with package read access>
+```
+
+The server needs Docker Compose v2 installed and `DEPLOY_USER` must be able to run Docker commands.
